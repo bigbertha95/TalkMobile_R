@@ -1,20 +1,24 @@
 ####Loading needed packages####
 library(tidyverse)
+library(mice)
 
 ####Reading in original data files####
-#gender_age_test <- read_csv("Data/gender_age_test.csv")
-#NOTE: Don't need the test set
+
 gender_age_train <- read_csv("Data/gender_age_train.csv")
 app_labels <- read_csv("Data/app_labels.csv")
 events <- read_csv("Data/events.csv")
 label_categories <- read_csv("Data/label_categories.csv")
 phone_brand_device_model <- read_csv("Data/phone_brand_device_model.csv") 
+app_events <- read_csv("Data/app_events.csv")
 #sample_submission <- read_csv("Data/sample_submission.csv")
 #NOTE: Don't need the sample submission
-app_events <- read_csv("Data/app_events.csv")
+#gender_age_test <- read_csv("Data/gender_age_test.csv")
+#NOTE: Don't need the test set
 
 ####Merging the data into one file####
-###Merge gender_age_train and phone_brand_device_model into new df named 'merge_data_1'###
+#     File to predict age/gender     #
+
+####Merge gender_age_train and phone_brand_device_model into new df named 'merge_data_1'####
 merged_data_1 <-
 gender_age_train %>%
   left_join(phone_brand_device_model, by = "device_id") 
@@ -27,11 +31,16 @@ merged_data_1$duplicate <- duplicated(merged_data_1) | duplicated(merged_data_1,
 plyr::count(merged_data_1, "duplicate")
 #There are 386 duplicate rows
 
+#Creating a flag variable to identify the cases that were duplicates after deduping
+merged_data_1$device_model_duplicate_flag <- 0
+merged_data_1$device_model_duplicate_flag[merged_data_1$duplicate == "TRUE"] <- 1
+plyr::count(merged_data_1, "device_model_duplicate_flag")
+
 #Removing duplicates where the entire row is a duplicate (every column matches)
 #Also dropping the duplicate column as it is no longer needed
 #By remove, I mean leaving only 1 of the duplicated rows in the dataset
 merged_data_1 <- merged_data_1[!duplicated(merged_data_1), ] %>%
-  select(-duplicate) #dropping column that identified duplicates
+  select(-duplicate)
 #NOTE: There is one duplicate observation where the entire row isn't duplicated
 
 #Identifying the duplicate where only device_id is a duplicated
@@ -59,15 +68,18 @@ merged_data_1$gender <- as.factor(merged_data_1$gender)
 merged_data_1$group <- as.factor(merged_data_1$group)
 merged_data_1$phone_brand <- as.factor(merged_data_1$phone_brand)
 merged_data_1$device_model <- as.factor(merged_data_1$device_model)
+merged_data_1$device_model_duplicate_flag <- as.factor(merged_data_1$device_model_duplicate_flag)
 
 #Confirming types and verified that there are no NA values in the merged set
 summary(merged_data_1)
+merged_data_1_missing_pattern <- as.data.frame(md.pattern(merged_data_1))
 
 #Removing the phone_brand_device_model df and the gender_age_train df from the environment as they are now merged into the new df
 rm(phone_brand_device_model)
 rm(gender_age_train)
+rm(merged_data_1_missing_pattern)
 
-###Merge events and app_events into new df named 'merged_data_2'###
+####Merge events and app_events into new df named 'merged_data_2'####
 #Because of the size of these files it is easier to check or duplicates prior to merge
 #Checking if there are any complete (full row) duplicates in the events data
 events$duplicate <- duplicated(events) | duplicated(events, fromLast = TRUE)
@@ -84,6 +96,8 @@ events <- events %>%
   select(-duplicate)%>%
   select(-duplicate_event_id)
 
+head(events)
+
 #Checking if there are any complete (full row) duplicates in the app_events data
 app_events$duplicate <- duplicated(app_events) | duplicated(app_events, fromLast = TRUE)
 plyr::count(app_events, "duplicate")
@@ -97,11 +111,19 @@ app_events_duplicates <- app_events %>%
 #Deleting the df of only duplicates that was used to visually check for full duplicates
 rm(app_events_duplicates) 
 
+#Creating a flag variable to identify which obervations were duplicates after deduping
+app_events$app_event_full_duplicate_flag <- 0
+app_events$app_event_full_duplicate_flag[app_events$duplicate == "TRUE"] <- 1
+plyr::count(app_events, "app_event_full_duplicate_flag")
+
 #Removing the complete (full row) duplicates
 #By remove, I mean that I leave only 1 of the matching observations the df
 #Also dropping the duplicate column as it is no longer needed
 app_events <- app_events[!duplicated(app_events), ] %>%
   select(-duplicate)
+
+#Visual observation to assess the first few rows of data
+head(app_events)
 
 #For the app_events data it would make sense to have duplicate event_ids and duplicate app_ids, but duplicate combinations shouldn't exist
 #Checking if there are any event_id and app_id combination duplicates in the cleaner app_events data
@@ -118,10 +140,16 @@ app_events_duplicates <- app_events %>%
 #Deleting the df of only duplicates that was used to visually check for full duplicates
 rm(app_events_duplicates)
 
-#Completely removing the duplicates where there are multiple event_id and app_id combinations
-#By remove, I mean completely remove so none remain in the df
+#Creating a flag variable so that these duplicates can be identified after deduping
+app_events$is_active_duplicate_flag <- 0
+app_events$is_active_duplicate_flag[app_events$duplicate == "TRUE"] <- 1
+head(app_events)
+
+#Removing the partial (app_id and event_id combination) duplicates
+#By remove, I mean that I leave only 1 of the matching observations the df
+#I am forcing it to choose the observation that has is_active as 1
 app_events <- app_events%>%
-  filter(duplicate == "FALSE")
+  filter(duplicate == "FALSE" | duplicate == "TRUE" & is_active == 1)
 
 #Confirming only non-duplicates remain
 plyr::count(app_events, "duplicate")
@@ -136,9 +164,21 @@ merged_data_2 <-
   events %>%
   left_join(app_events, by = "event_id") 
 
+#Getting summary of the new combined dataset
 summary(merged_data_2)
-#NOTE: All event_ids within app_events exist in events; however, not all event_ids in events exist in app_events
-#So, what are events that don't have an associated app_event?
+
+
+n_distinct(merged_data_2$event_id)
+#3,252,950 unique event_id as expected
+summary(plyr::count(merged_data_2$event_id))
+#Min value of 1 and max value of 319 event_id
+
+n_distinct(merged_data_2$device_id)
+#60,864 unique device_id
+summary(plyr::count(merged_data_2$device_id))
+#Min value of 1 and max value of 184,051 device_id
+
+summary(merged_data_2)
 
 #Removing the app_events and events dfs from the environment as they are now merged
 rm(app_events)
@@ -190,7 +230,6 @@ summary(merged_data_3)
 #the category variable is being stored as a large character, but should be a factor
 merged_data_3$category <- as.factor(merged_data_3$category)
 
-summary(merged_data_3)
 
 #removing the app_labels and label_categories dfs from the environment because they are now merged
 rm(app_labels)
@@ -203,10 +242,40 @@ merged_data_4 <- merged_data_1%>%
 
 summary(merged_data_4)
 #NOTE: There are 51,336 device_ids that exist in merged_data_1 that do not exist in merged_data_2 - I assume that these are instances in which there is no event activity
+n_distinct(merged_data_4$device_id)
+
 
 final_merged_data <- merged_data_4 %>%
   left_join(merged_data_3, by = "app_id")
+n_distinct(merged_data_4$device_id)
+
 
 summary(final_merged_data)
 
 write_csv(final_merged_data, "merged_data_Jordan.csv")
+
+Other_File <- read_csv("Merged_Data.csv")
+
+summary(Other_File)
+test <- na.omit(final_merged_data)
+length(unique(Other_File$device_id))
+length(unique(final_merged_data$device_id))
+length(unique(test$device_id))
+?count
+
+missing_pattern_me <- as.data.frame(md.pattern(final_merged_data))
+
+?group_by
+
+?sample
+
+set.seed(1)
+sample <- sample_n(final_merged_data, size = 1000000, replace = FALSE)
+
+by_device_id <- group_by(sample, device_id) 
+test <- by_device_id %>%
+summarise(event_count = n_distinct(event_id), 
+          app_count = n_distinct(app_id), 
+          is_active_count = sum(is_active),
+          label_id_unique = n_distinct(label_id))
+
