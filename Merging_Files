@@ -1,6 +1,7 @@
 ####Loading needed packages####
 library(tidyverse)
 library(mice)
+library(lubridate)
 
 ####Reading in original data files####
 
@@ -254,8 +255,6 @@ summary(final_merged_data)
 
 write_csv(final_merged_data, "merged_data_Jordan.csv")
 
-Other_File <- read_csv("Merged_Data.csv")
-
 summary(Other_File)
 test <- na.omit(final_merged_data)
 length(unique(Other_File$device_id))
@@ -263,19 +262,37 @@ length(unique(final_merged_data$device_id))
 length(unique(test$device_id))
 ?count
 
-missing_pattern_me <- as.data.frame(md.pattern(final_merged_data))
-
-?group_by
-
-?sample
+#missing_pattern_me <- as.data.frame(md.pattern(final_merged_data))
 
 set.seed(1)
 sample <- sample_n(final_merged_data, size = 1000000, replace = FALSE)
 
-by_device_id <- group_by(sample, device_id) 
-test <- by_device_id %>%
-summarise(event_count = n_distinct(event_id), 
-          app_count = n_distinct(app_id), 
-          is_active_count = sum(is_active),
-          label_id_unique = n_distinct(label_id))
+sample$timestamp <- ymd_hms(sample$timestamp)
 
+by_device_id <- group_by(sample, device_id) 
+
+test <- by_device_id %>%
+summarise(event_count = n_distinct(event_id, na.rm = TRUE), 
+          app_id_unique_count = n_distinct(app_id, na.rm = TRUE), 
+          is_active_sum = sum(is_active, na.rm = TRUE),
+          label_id_unique_count = n_distinct(label_id, na.rm = TRUE),
+          timestamp_unique_count = n_distinct(timestamp, na.rm = TRUE),
+          days_between_first_and_last = max(timestamp, na.rm = TRUE) - min(timestamp, na.rm = TRUE))
+
+test <- test %>%
+  left_join(merged_data_1, by = "device_id")
+
+write_csv(test, "sample_demographic_file.csv")
+
+
+final_merged_data$timestamp <- ymd_hms(final_merged_data$timestamp)
+
+by_device_id <- group_by(final_merged_data, device_id) 
+
+demograhic_dataset <- by_device_id %>%
+  summarise(event_count = n_distinct(event_id, na.rm = TRUE), 
+            app_id_unique_count = n_distinct(app_id, na.rm = TRUE), 
+            is_active_sum = sum(is_active, na.rm = TRUE),
+            label_id_unique_count = n_distinct(label_id, na.rm = TRUE),
+            timestamp_unique_count = n_distinct(timestamp, na.rm = TRUE),
+            days_between_first_and_last = max(timestamp, na.rm = TRUE) - min(timestamp, na.rm = TRUE))
