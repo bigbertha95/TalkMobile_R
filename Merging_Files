@@ -3,6 +3,10 @@ library(tidyverse)
 library(mice)
 library(lubridate)
 library(Hmisc)
+library(stringr)
+library(readr)
+library(plyr)
+library(dplyr)
 
 ####Reading in original data files####
 device_ids_matched <- read_csv("List of 23038 device ids that match.csv")
@@ -264,6 +268,11 @@ summary(final_merged_data)
 n_distinct(final_merged_data$device_id) #23,038 as expected
 head(final_merged_data)
 
+rm(merged_data_2)
+rm(merged_data_3)
+rm(merged_data_4)
+rm(device_ids_matched)
+
 ###Writing to csv file (note hashed out because I don't want to rewrite)
 #write_csv(final_merged_data, "merged_data_Jordan.csv")
 
@@ -272,50 +281,124 @@ final_merged_data_train <- final_merged_data %>%
   filter(device_id %in% device_ids_train$device_id)
 n_distinct(final_merged_data_train$device_id) #17,278 as expected
 
-#grouping by device_id in preparation for summarising
-by_device_id_train <- group_by(final_merged_data_train, device_id) 
+summary(final_merged_data_train)
+
 #Creating each column for the final training set
-by_device_id_train_counts <- by_device_id_train %>%
-  summarise(event_count = n_distinct(event_id, na.rm = TRUE), 
-            app_id_unique_count = n_distinct(app_id, na.rm = TRUE), 
-            is_active_sum = sum(is_active, na.rm = TRUE),
-            label_id_unique_count = n_distinct(label_id, na.rm = TRUE),
-            timestamp_unique_count = n_distinct(timestamp, na.rm = TRUE),
-            earilest_timestamp = min(timestamp),
-            latest_timestamp = max(timestamp),
-            days_between_first_and_last_timestamp = difftime(max(timestamp, na.rm = TRUE), min(timestamp, na.rm = TRUE), units = "days"),
-            hourse_between_first_and_last_timestamp = difftime(max(timestamp, na.rm = TRUE), min(timestamp, na.rm = TRUE), units = "hours"))
-#merging device id and demographic information back in to final train set
-by_device_id_final_train <- by_device_id_train_counts %>%
+by_device_id_train_counts_1 <- final_merged_data_train %>%
+  group_by(
+    device_id
+  ) %>%
+  dplyr::summarize(
+    event_count = n_distinct(event_id, na.rm = TRUE), 
+    app_id_unique_count = n_distinct(app_id, na.rm = TRUE), 
+    is_active_sum = sum(is_active, na.rm = TRUE),
+    label_id_unique_count = n_distinct(label_id, na.rm = TRUE),
+    timestamp_unique_count = n_distinct(timestamp, na.rm = TRUE),
+    earilest_timestamp = min(timestamp),
+    latest_timestamp = max(timestamp),
+    days_between_first_and_last_timestamp = difftime(max(timestamp, na.rm = TRUE), min(timestamp, na.rm = TRUE), units = "days"),
+    hours_between_first_and_last_timestamp = difftime(max(timestamp, na.rm = TRUE), min(timestamp, na.rm = TRUE), units = "hours"),
+    big_category_unique_count = n_distinct(big_category, na.rm = TRUE)
+  )
+
+by_device_id_train_counts_2 <- final_merged_data_train %>%
+  group_by(
+    device_id,
+    big_category
+  ) %>%
+  dplyr::summarize(
+    category_count = n()
+  ) %>%
+  filter(
+    !is.na(big_category)
+  ) %>%
+  spread(
+    big_category,
+    category_count,
+    fill = 0
+  )
+
+names(by_device_id_train_counts_2)[2:ncol(by_device_id_train_counts_2)] <- str_c(
+  'bc_',
+  str_replace_all(
+    names(by_device_id_train_counts_2)[2:ncol(by_device_id_train_counts_2 )],
+    ' ',
+    ''
+  )
+)
+
+#merging counts together and adding demographics back into training set
+by_device_id_final_train <- left_join(by_device_id_train_counts_1, by_device_id_train_counts_2, by = 'device_id') %>%
   left_join(merged_data_1, by = "device_id")
 
+rm(by_device_id_train_counts_1)
+rm(by_device_id_train_counts_2)
+rm(final_merged_data_train)
+
 #writing the final train dataset to a csv
-write_csv(by_device_id_final_train, "by_device_id_final_train")
+write_csv(by_device_id_final_train, "by_device_id_final_train.csv")
 
 #Reducing final_merged_data to only device ids in the test set#
 final_merged_data_test <- final_merged_data %>%
   filter(!device_id %in% device_ids_train$device_id)
 n_distinct(final_merged_data_test$device_id) #5,760 as expected
 
-#grouping by device_id in preparation for summarising
-by_device_id_test <- group_by(final_merged_data_test, device_id) 
 #Creating each column for the final test set
-by_device_id_test_counts <- by_device_id_test %>%
-  summarise(event_count = n_distinct(event_id, na.rm = TRUE), 
-            app_id_unique_count = n_distinct(app_id, na.rm = TRUE), 
-            is_active_sum = sum(is_active, na.rm = TRUE),
-            label_id_unique_count = n_distinct(label_id, na.rm = TRUE),
-            timestamp_unique_count = n_distinct(timestamp, na.rm = TRUE),
-            earilest_timestamp = min(timestamp),
-            latest_timestamp = max(timestamp),
-            days_between_first_and_last_timestamp = difftime(max(timestamp, na.rm = TRUE), min(timestamp, na.rm = TRUE), units = "days"),
-            hourse_between_first_and_last_timestamp = difftime(max(timestamp, na.rm = TRUE), min(timestamp, na.rm = TRUE), units = "hours"))
-#merging device id and demographic information back in to final test set
-by_device_id_final_test <- by_device_id_test_counts %>%
+by_device_id_test_counts_1 <- final_merged_data_test %>%
+  group_by(
+    device_id
+  ) %>%
+  dplyr::summarize(
+    event_count = n_distinct(event_id, na.rm = TRUE), 
+    app_id_unique_count = n_distinct(app_id, na.rm = TRUE), 
+    is_active_sum = sum(is_active, na.rm = TRUE),
+    label_id_unique_count = n_distinct(label_id, na.rm = TRUE),
+    timestamp_unique_count = n_distinct(timestamp, na.rm = TRUE),
+    earilest_timestamp = min(timestamp),
+    latest_timestamp = max(timestamp),
+    days_between_first_and_last_timestamp = difftime(max(timestamp, na.rm = TRUE), min(timestamp, na.rm = TRUE), units = "days"),
+    hours_between_first_and_last_timestamp = difftime(max(timestamp, na.rm = TRUE), min(timestamp, na.rm = TRUE), units = "hours"),
+    big_category_unique_count = n_distinct(big_category, na.rm = TRUE)
+  )
+
+by_device_id_test_counts_2 <- final_merged_data_test %>%
+  group_by(
+    device_id,
+    big_category
+  ) %>%
+  dplyr::summarize(
+    category_count = n()
+  ) %>%
+  filter(
+    !is.na(big_category)
+  ) %>%
+  spread(
+    big_category,
+    category_count,
+    fill = 0
+  )
+
+names(by_device_id_test_counts_2)[2:ncol(by_device_id_test_counts_2)] <- str_c(
+  'bc_',
+  str_replace_all(
+    names(by_device_id_test_counts_2)[2:ncol(by_device_id_test_counts_2 )],
+    ' ',
+    ''
+  )
+)
+
+#merging counts together and adding demographics back into training set
+by_device_id_final_test <- left_join(by_device_id_test_counts_1, by_device_id_test_counts_2, by = 'device_id') %>%
   left_join(merged_data_1, by = "device_id")
 
-#writing the final test dataset to a csv
-write_csv(by_device_id_final_test, "by_device_id_final_test")
+#writing the final train dataset to a csv
+write_csv(by_device_id_final_test, "by_device_id_final_test.csv")
+
+rm(by_device_id_test_counts_1)
+rm(by_device_id_test_counts_2)
+rm(final_merged_data_test)
+rm(device_ids_test)
+rm(device_ids_train)
 
 #write_csv(test, "sample_demographic_file.csv")
 #device_id_matched <- as.data.frame(test$device_id)
