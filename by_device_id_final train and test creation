@@ -1,0 +1,396 @@
+####Loading needed packages####
+library(tidyverse)
+library(mice)
+library(lubridate)
+library(Hmisc)
+library(stringr)
+library(readr)
+library(plyr)
+library(dplyr)
+
+options(scipen = 999)
+
+####Creating function for dimension reduction####
+collapsecategory <- function(x,p){
+  levels_len = length(levels(x))
+  levels(x)[levels_len+1] = 'Other'
+  y= table(x)/length(x)
+  y1 = as.vector(y)
+  y2 = names(y)
+  y2_len = length(y2)
+  for(i in 1:y2_len){
+    if(y1[i]<=p){
+      x[x == y2[i]] = 'Other'
+    }
+  }
+  x <- droplevels(x)
+  x
+}
+
+####Reading in original data files####
+gender_age_train <- read_csv("Data/gender_age_train.csv")
+app_labels <- read_csv("Data/app_labels.csv")
+events <- read_csv("Data/events.csv")
+label_categories <- read_csv("Data/label_categories_big2.csv") #Note this file was modified by CJ and pulled from google drive
+phone_brand_device_model <- read_csv("Data/Brand_Find_Replace2.csv") #Note this file was modififed by CJ and pulled from google drive
+app_events <- read_csv("Data/app_events.csv")
+#label_categories <- read_csv("Data/label_categories.csv") NOTE: Reading in the labels and brands modefied by CJ, so the raw data is not needed
+#phone_brand_device_model <- read_csv("Data/phone_brand_device_model.csv") NOTE: Reading in the labels and brands modefied by CJ, so the raw data is not needed
+#sample_submission <- read_csv("Data/sample_submission.csv") NOTE: Don't need the sample submission
+#gender_age_test <- read_csv("Data/gender_age_test.csv") NOTE: Don't need the test set
+
+####Merging the data into one file####
+#     File to predict age/gender     #
+####Merge gender_age_train and phone_brand_device_model into new df named 'merge_data_1'####
+merged_data_1 <-
+gender_age_train %>%
+  left_join(phone_brand_device_model, by = "device_id")
+
+#Identifying duplicates where the entire row is a duplicate (every column matches)
+merged_data_1$duplicate <- duplicated(merged_data_1) | duplicated(merged_data_1, fromLast = TRUE)
+
+#Counting the number of duplicate rows
+plyr::count(merged_data_1, "duplicate")
+#There are 386 duplicate rows
+
+#Creating a flag variable to identify the cases that were duplicates after deduping
+merged_data_1$device_model_duplicate_flag <- 0
+merged_data_1$device_model_duplicate_flag[merged_data_1$duplicate == "TRUE"] <- 1
+plyr::count(merged_data_1, "device_model_duplicate_flag")
+
+#Removing duplicates where the entire row is a duplicate (every column matches)
+#Also dropping the duplicate column as it is no longer needed
+#By remove, I mean leaving only 1 of the duplicated rows in the dataset
+merged_data_1 <- merged_data_1[!duplicated(merged_data_1), ] %>%
+  select(-duplicate)
+#NOTE: There is one duplicate observation where the entire row isn't duplicated
+
+#Identifying the duplicate where only device_id is a duplicated
+merged_data_1$duplicate_device_id <- duplicated(merged_data_1$device_id) | duplicated(merged_data_1$device_id, fromLast = TRUE)
+
+#Counting the number of duplicate rows for just device_id
+plyr::count(merged_data_1, "duplicate_device_id")
+#Confirms 2 rows with same device_id
+#NOTE: This obervation has the same device_id, but different device_model and phone_brand
+
+#Entirely removing the device_id that has inconsistent data
+#By remove, I mean removing both observations and eliminating this device_id entirely
+merged_data_1 <- merged_data_1 %>%
+  filter(duplicate_device_id == "FALSE") %>%
+  select(-duplicate_device_id)
+
+#Visually inspecting observations
+head(merged_data_1)
+#summarizing each variable in the df
+summary(merged_data_1)
+#NOTE: gender, group, phone_brand, and device_model are being read as large character fields when in reality these could be factors
+
+#Changing gender, group, phone_brand, and device_model into factor types
+merged_data_1$gender <- as.factor(merged_data_1$gender)
+merged_data_1$group <- as.factor(merged_data_1$group)
+merged_data_1$phone_brand <- as.factor(merged_data_1$phone_brand)
+merged_data_1$device_model <- as.factor(merged_data_1$device_model)
+merged_data_1$device_model_duplicate_flag <- as.factor(merged_data_1$device_model_duplicate_flag)
+
+#Confirming types and verified that there are no NA values in the merged set
+summary(merged_data_1)
+md.pattern(merged_data_1) #NOTE: No missing values within the 74,644 device_ids
+
+####Merge events and app_events into new df named 'merged_data_2'####
+#Because of the size of these files it is easier to check or duplicates prior to merge
+#Checking if there are any complete (full row) duplicates in the events data
+#events$duplicate <- duplicated(events) | duplicated(events, fromLast = TRUE)
+#plyr::count(events, "duplicate")
+#NOTE: There are no complete duplicates, so I am commenting out this code
+
+#Checking if there are any event_id only duplicates in the events data
+#events$duplicate_event_id <- duplicated(events$event_id) | duplicated(events$event_id, fromLast = TRUE)
+#plyr::count(events, "duplicate_event_id")
+#NOTE: There are no duplicate event_ids in the events data, so I am commenting out this code
+
+#Removing the variables (duplicate and duplicate_event_id) used to identify duplicates from events data
+#events <- events %>%
+#  select(-duplicate)%>%
+#  select(-duplicate_event_id)
+#NOTE: Because the obove were commented out there is no colums to remove
+events$timestamp_hour <- hour(events$timestamp)
+head(events$timestamp_hour)
+head(events$timestamp)
+sort(unique(events$timestamp_hour))
+
+by_device_id_event <- events %>%
+  group_by(
+    device_id,
+    timestamp_hour
+  ) %>%
+  dplyr::summarize(
+    timestamp_count = n()
+  ) %>%
+  spread(
+    timestamp_hour,
+    timestamp_count,
+    fill = 0
+  )
+
+names(by_device_id_event)[2:ncol(by_device_id_event)] <- str_c(
+  'count_event_hour_',
+  str_replace_all(
+    names(by_device_id_event)[2:ncol(by_device_id_event)],
+    ' ',
+    ''
+  )
+)
+
+head(events) # Visually verifying the file looks right
+
+#Checking if there are any complete (full row) duplicates in the app_events data
+app_events$duplicate <- duplicated(app_events) | duplicated(app_events, fromLast = TRUE)
+plyr::count(app_events, "duplicate")
+#Indicates that there are 23,820 rows that have complete duplicates
+
+#Creating a new dataset of only duplicates to visually verify the duplicates
+app_events_duplicates <- app_events %>%
+  filter(duplicate == "TRUE")
+#Quick visual look and it does appear that these are all full duplicates (across all rows)
+
+#Deleting the df of only duplicates that was used to visually check for full duplicates
+rm(app_events_duplicates) 
+
+#Creating a flag variable to identify which obervations were duplicates after deduping
+app_events$app_event_full_duplicate_flag <- 0
+app_events$app_event_full_duplicate_flag[app_events$duplicate == "TRUE"] <- 1
+plyr::count(app_events, "app_event_full_duplicate_flag")
+
+#Removing the complete (full row) duplicates
+#By remove, I mean that I leave only 1 of the matching observations the df
+#Also dropping the duplicate column as it is no longer needed
+app_events <- app_events[!duplicated(app_events), ] %>%
+  select(-duplicate)
+
+#Visual observation to assess the first few rows of data
+head(app_events)
+
+#For the app_events data it would make sense to have duplicate event_ids and duplicate app_ids, but duplicate combinations shouldn't exist
+#Checking if there are any event_id and app_id combination duplicates in the cleaner app_events data
+app_events$duplicate <- duplicated(app_events[,1:2]) | duplicated(app_events[,1:2], fromLast = TRUE)
+plyr::count(app_events, "duplicate")
+#There are 2,946 duplicates rows of event_id and app_id
+
+#Creating a new dataset of only duplicates to visually verify the duplicates
+app_events_duplicates <- app_events %>%
+  filter(duplicate == "TRUE")
+#Quick visual look and it does appear that these are duplicates with multiple rows with thes same event_id and app_id 
+#Duplicates have the same event_id and app_id, but each has one row where is_active is 1 and one row where is_active is 0
+
+#Deleting the df of only duplicates that was used to visually check for full duplicates
+rm(app_events_duplicates)
+
+#Creating a flag variable so that these duplicates can be identified after deduping
+app_events$is_active_duplicate_flag <- 0
+app_events$is_active_duplicate_flag[app_events$duplicate == "TRUE"] <- 1
+head(app_events)
+
+#Removing the partial (app_id and event_id combination) duplicates
+#By remove, I mean that I leave only 1 of the matching observations the df
+#I am forcing it to choose the observation that has is_active as 1
+app_events <- app_events%>%
+  filter(duplicate == "FALSE" | duplicate == "TRUE" & is_active == 1)
+
+#Confirming only half of the duplicates remain
+plyr::count(app_events, "duplicate")
+
+#Dropping the duplicate column as it is no longer needed
+app_events <- app_events%>%
+  select(-duplicate)
+
+#Merging the events and app_events dfs into a new df named merged_data_2
+#Using a full_join, so all observations should remain
+merged_data_2 <-
+  events %>%
+  inner_join(app_events, by = "event_id") 
+#NOTE: With a left_join there are 1,764,854 events that have no accompyaning app_events
+
+#Getting summary of the new combined dataset
+summary(merged_data_2)
+
+n_distinct(merged_data_2$event_id)
+n_distinct(merged_data_2$device_id)
+summary(plyr::count(merged_data_2$device_id))
+#NOTE: 60,821 unique device_id. Compared to merged_data_1, this is less which means there will be missing
+
+###Merge app_labels and label_categories into new df named 'merge_data_3'###
+#Checking to see if there are full duplicates in the label_categories df
+label_categories$duplicate <- duplicated(label_categories) | duplicated(label_categories, fromLast = TRUE)
+plyr::count(label_categories, "duplicate")
+#No duplicates
+
+#Checking to see if label_id within label_categories alone is duplicated
+label_categories$duplicate <- duplicated(label_categories$label_id) | duplicated(label_categories$label_id, fromLast = TRUE)
+plyr::count(label_categories, "duplicate")
+#No duplicates
+
+#Removing duplicate column as it is no longer needed
+label_categories <- label_categories%>%
+  select(-duplicate)
+
+#Checking to see if there are any full duplicates in the app_labels df
+app_labels$duplicate <- duplicated(app_labels) | duplicated(app_labels, fromLast = TRUE)
+plyr::count(app_labels, "duplicate")
+#There are 32,134 rows that are complete matches with other rows
+
+#Removing the duplicate rows in the app_labels df
+#By remove, I mean keeping only 1 row when there are multiple rows that are identical
+app_labels <- app_labels[!duplicated(app_labels), ] %>%
+  select(-duplicate)
+
+#Checking to see if app_id within app_labels along is duplicated
+app_labels$duplicate <- duplicated(app_labels$app_id) | duplicated(app_labels$app_id, fromLast = TRUE)
+plyr::count(app_labels, "duplicate")
+#Yes, most are duplicated which indicates that most app_ids have multiple label_ids (meaning apps have multple category assignments)
+
+app_labels <- app_labels%>%
+  select(-duplicate)
+
+merged_data_3 <-
+  app_labels %>%
+  inner_join(label_categories, by = "label_id") 
+#NOTE: there are 423 more observations post merge compared to the n from app_labels prior to merge
+#This was found by doing a full_join
+#This indicates that there are 423 labels that didn't match to an app
+#We don't care about labels that aren't associated with an app, so a left_join was used
+
+summary(merged_data_3)
+
+#the category variable is being stored as a large character, but should be a factor
+merged_data_3$category <- as.factor(merged_data_3$category)
+merged_data_3$big_category <- as.factor(merged_data_3$big_category)
+
+###Merging merged_data_1 and merged_data_2 into a new df named 'merged_data_4###
+#left_join was used because we only want more information on devices also found in the training set
+merged_data_4 <- merged_data_1%>%
+  inner_join(merged_data_2, by = "device_id")
+
+summary(merged_data_4)
+n_distinct(merged_data_4$device_id) #23,289 
+
+###Merging merged_data_4 and merged_data_3 into new df named 'final_merged_data;###
+final_merged_data <- merged_data_4 %>%
+  left_join(merged_data_3, by = "app_id")
+
+summary(final_merged_data) #84,293,995 rows
+n_distinct(final_merged_data$device_id) #23,289
+n_distinct(final_merged_data$age) #78
+n_distinct(final_merged_data$group) #12
+n_distinct(final_merged_data$phone_brand) #69
+n_distinct(final_merged_data$device_model) #906
+n_distinct(final_merged_data$event_id) #556,354
+n_distinct(final_merged_data$app_id) #13,653
+n_distinct(final_merged_data$timestamp) #344,842
+n_distinct(final_merged_data$label_id) #485
+n_distinct(final_merged_data$category) #451
+n_distinct(final_merged_data$big_category) #31
+head(final_merged_data)
+
+#Creating each column for the final training set
+by_device_id_counts_misc <- final_merged_data %>%
+  group_by(
+    device_id
+  ) %>%
+  dplyr::summarize(
+    event_unique_count = n_distinct(event_id), 
+    app_id_unique_count = n_distinct(app_id), 
+    timestamp_unique_count = n_distinct(timestamp),
+    earilest_timestamp = min(timestamp),
+    latest_timestamp = max(timestamp),
+    days_between_first_and_last_timestamp = difftime(max(timestamp), min(timestamp), units = "days"),
+    hours_between_first_and_last_timestamp = difftime(max(timestamp), min(timestamp), units = "hours"),
+    label_id_unique_count = n_distinct(label_id),
+    category_unique_count = n_distinct(category),
+    big_category_unique_count = n_distinct(big_category)
+  )
+
+by_device_id_counts_big_category <- final_merged_data %>%
+  group_by(
+    device_id,
+    big_category
+  ) %>%
+  dplyr::summarize(
+    category_count = n()
+  ) %>%
+  spread(
+    big_category,
+    category_count,
+    fill = 0
+  )
+
+names(by_device_id_counts_big_category)[2:ncol(by_device_id_counts_big_category)] <- str_c(
+  'bc_count_',
+  str_replace_all(
+    names(by_device_id_counts_big_category)[2:ncol(by_device_id_counts_big_category)],
+    ' ',
+    ''
+  )
+)
+
+by_device_id_counts_category <- final_merged_data %>%
+  group_by(
+    device_id,
+    category
+  ) %>%
+  dplyr::summarize(
+    category_count = n()
+  ) %>%
+  spread(
+    category,
+    category_count,
+    fill = 0
+  )
+
+names(by_device_id_counts_category)[2:ncol(by_device_id_counts_category)] <- str_c(
+  'category_count_',
+  str_replace_all(
+    names(by_device_id_counts_category)[2:ncol(by_device_id_counts_category)],
+    ' ',
+    ''
+  )
+)
+
+by_device_id_counts_label_id <- final_merged_data %>%
+  group_by(
+    device_id,
+    label_id
+  ) %>%
+  dplyr::summarize(
+    label_count = n()
+  ) %>%
+  spread(
+    label_id,
+    label_count,
+    fill = 0
+  )
+
+names(by_device_id_counts_label_id)[2:ncol(by_device_id_counts_label_id)] <- str_c(
+  'label_count_',
+  str_replace_all(
+    names(by_device_id_counts_label_id)[2:ncol(by_device_id_counts_label_id)],
+    ' ',
+    ''
+  )
+)
+
+
+by_device_id_final_full <- gender_age_train %>%
+  inner_join(by_device_id_counts_misc, by = "device_id") %>%
+  inner_join(by_device_id_event, by = "device_id") %>%
+  inner_join(by_device_id_counts_label_id, by = "device_id") %>%
+  inner_join(by_device_id_counts_category, by = "device_id") %>%
+  inner_join(by_device_id_counts_big_category, by = "device_id")
+
+
+set.seed(1)
+by_device_id_final_train <- sample_frac(by_device_id_final_full, size = 0.75)
+by_device_id_final_test <- by_device_id_final_full %>%
+  filter(!device_id %in% by_device_id_final_train$device_id)
+
+write_csv(by_device_id_final_train, "by_device_id_final_train.csv")
+write_csv(by_device_id_final_test, "by_device_id_final_test.csv")
